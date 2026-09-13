@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef } from 'react';
 import { supabase } from '../lib/supabaseClient';
 
 const SAVE_DELAY = 800;
@@ -19,43 +19,68 @@ export default function BlockCanvas({ reportId, section, blocks, onBlocksChange 
   }
 
   async function addTextBlock() {
-    const { data, error } = await supabase
-      .from('report_blocks')
-      .insert({
-        report_id: reportId,
-        section_key: section.key,
-        block_type: 'text',
-        text_content: '',
-        sort_order: nextSortOrder(),
-      })
-      .select()
-      .single();
-    if (!error) onBlocksChange([...(blocks || []), data]);
+    try {
+      const { data, error } = await supabase
+        .from('report_blocks')
+        .insert({
+          report_id: reportId,
+          section_key: section.key,
+          block_type: 'text',
+          text_content: '',
+          sort_order: nextSortOrder(),
+        })
+        .select()
+        .single();
+
+      if (error) {
+        alert('Gagal nambah teks: ' + error.message);
+        return;
+      }
+      if (!data) {
+        alert('Gagal nambah teks: gak dapet respon dari server');
+        return;
+      }
+      onBlocksChange([...(blocks || []), data]);
+    } catch (err) {
+      alert('Error nambah teks: ' + (err?.message || String(err)));
+    }
   }
 
   async function handleUpload(e) {
     const file = e.target.files[0];
     if (!file) return;
-    const path = `${reportId}/${section.key}/${Date.now()}_${file.name}`;
-    const { error: uploadError } = await supabase.storage.from('report-images').upload(path, file);
-    if (uploadError) {
-      alert('Upload gagal: ' + uploadError.message);
-      return;
+
+    try {
+      const path = `${reportId}/${section.key}/${Date.now()}_${file.name}`;
+      const { error: uploadError } = await supabase.storage.from('report-images').upload(path, file);
+      if (uploadError) {
+        alert('Upload gambar gagal: ' + uploadError.message);
+        return;
+      }
+
+      const { data, error } = await supabase
+        .from('report_blocks')
+        .insert({
+          report_id: reportId,
+          section_key: section.key,
+          block_type: 'image',
+          storage_path: path,
+          caption: '',
+          sort_order: nextSortOrder(),
+        })
+        .select()
+        .single();
+
+      if (error) {
+        alert('Gambar keupload tapi gagal disimpan ke laporan: ' + error.message);
+        return;
+      }
+      onBlocksChange([...(blocks || []), data]);
+    } catch (err) {
+      alert('Error upload gambar: ' + (err?.message || String(err)));
+    } finally {
+      e.target.value = '';
     }
-    const { data, error } = await supabase
-      .from('report_blocks')
-      .insert({
-        report_id: reportId,
-        section_key: section.key,
-        block_type: 'image',
-        storage_path: path,
-        caption: '',
-        sort_order: nextSortOrder(),
-      })
-      .select()
-      .single();
-    if (!error) onBlocksChange([...(blocks || []), data]);
-    e.target.value = '';
   }
 
   function updateLocal(blockId, patch) {
@@ -65,7 +90,10 @@ export default function BlockCanvas({ reportId, section, blocks, onBlocksChange 
   function debouncedSave(blockId, patch) {
     clearTimeout(timers.current[blockId]);
     timers.current[blockId] = setTimeout(async () => {
-      await supabase.from('report_blocks').update(patch).eq('id', blockId);
+      const { error } = await supabase.from('report_blocks').update(patch).eq('id', blockId);
+      if (error) {
+        alert('Gagal nyimpen perubahan: ' + error.message);
+      }
     }, SAVE_DELAY);
   }
 
@@ -80,36 +108,53 @@ export default function BlockCanvas({ reportId, section, blocks, onBlocksChange 
   }
 
   async function removeBlock(block) {
-    if (block.block_type === 'image' && block.storage_path) {
-      await supabase.storage.from('report-images').remove([block.storage_path]);
+    try {
+      if (block.block_type === 'image' && block.storage_path) {
+        await supabase.storage.from('report-images').remove([block.storage_path]);
+      }
+      const { error } = await supabase.from('report_blocks').delete().eq('id', block.id);
+      if (error) {
+        alert('Gagal hapus: ' + error.message);
+        return;
+      }
+      onBlocksChange((blocks || []).filter((b) => b.id !== block.id));
+    } catch (err) {
+      alert('Error hapus blok: ' + (err?.message || String(err)));
     }
-    await supabase.from('report_blocks').delete().eq('id', block.id);
-    onBlocksChange((blocks || []).filter((b) => b.id !== block.id));
   }
 
   async function moveBlock(block, direction) {
-    const sorted = [...(blocks || [])].sort((a, b) => a.sort_order - b.sort_order);
-    const idx = sorted.findIndex((b) => b.id === block.id);
-    const swapIdx = direction === 'up' ? idx - 1 : idx + 1;
-    if (swapIdx < 0 || swapIdx >= sorted.length) return;
+    try {
+      const sorted = [...(blocks || [])].sort((a, b) => a.sort_order - b.sort_order);
+      const idx = sorted.findIndex((b) => b.id === block.id);
+      const swapIdx = direction === 'up' ? idx - 1 : idx + 1;
+      if (swapIdx < 0 || swapIdx >= sorted.length) return;
 
-    const a = sorted[idx];
-    const b = sorted[swapIdx];
-    const aOrder = a.sort_order;
-    const bOrder = b.sort_order;
+      const a = sorted[idx];
+      const b = sorted[swapIdx];
+      const aOrder = a.sort_order;
+      const bOrder = b.sort_order;
 
-    await Promise.all([
-      supabase.from('report_blocks').update({ sort_order: bOrder }).eq('id', a.id),
-      supabase.from('report_blocks').update({ sort_order: aOrder }).eq('id', b.id),
-    ]);
+      const [r1, r2] = await Promise.all([
+        supabase.from('report_blocks').update({ sort_order: bOrder }).eq('id', a.id),
+        supabase.from('report_blocks').update({ sort_order: aOrder }).eq('id', b.id),
+      ]);
 
-    onBlocksChange(
-      sorted.map((x) => {
-        if (x.id === a.id) return { ...x, sort_order: bOrder };
-        if (x.id === b.id) return { ...x, sort_order: aOrder };
-        return x;
-      })
-    );
+      if (r1.error || r2.error) {
+        alert('Gagal ubah urutan: ' + (r1.error?.message || r2.error?.message));
+        return;
+      }
+
+      onBlocksChange(
+        sorted.map((x) => {
+          if (x.id === a.id) return { ...x, sort_order: bOrder };
+          if (x.id === b.id) return { ...x, sort_order: aOrder };
+          return x;
+        })
+      );
+    } catch (err) {
+      alert('Error ubah urutan: ' + (err?.message || String(err)));
+    }
   }
 
   const sortedBlocks = [...(blocks || [])].sort((a, b) => a.sort_order - b.sort_order);
@@ -132,6 +177,7 @@ export default function BlockCanvas({ reportId, section, blocks, onBlocksChange 
           <div key={block.id} className="group relative">
             <div className="absolute -left-1 top-0 flex flex-col gap-1 -translate-x-full pr-1 opacity-60">
               <button
+                type="button"
                 onClick={() => moveBlock(block, 'up')}
                 disabled={i === 0}
                 className="text-neutral-400 disabled:opacity-20 text-xs w-5 h-5"
@@ -139,6 +185,7 @@ export default function BlockCanvas({ reportId, section, blocks, onBlocksChange 
                 ▲
               </button>
               <button
+                type="button"
                 onClick={() => moveBlock(block, 'down')}
                 disabled={i === sortedBlocks.length - 1}
                 className="text-neutral-400 disabled:opacity-20 text-xs w-5 h-5"
@@ -176,6 +223,7 @@ export default function BlockCanvas({ reportId, section, blocks, onBlocksChange 
             )}
 
             <button
+              type="button"
               onClick={() => removeBlock(block)}
               className="absolute -right-1 -top-1 translate-x-full text-neutral-300 hover:text-red-500 text-xs px-1"
             >
@@ -188,12 +236,14 @@ export default function BlockCanvas({ reportId, section, blocks, onBlocksChange 
       {/* Toolbar tambah blok */}
       <div className="flex gap-2">
         <button
+          type="button"
           onClick={addTextBlock}
           className="flex-1 bg-neutral-800 rounded-lg py-2.5 text-xs font-medium"
         >
           + Tambah Teks
         </button>
         <button
+          type="button"
           onClick={() => fileInputRef.current?.click()}
           className="flex-1 bg-neutral-800 rounded-lg py-2.5 text-xs font-medium"
         >
@@ -203,7 +253,6 @@ export default function BlockCanvas({ reportId, section, blocks, onBlocksChange 
           ref={fileInputRef}
           type="file"
           accept="image/*"
-          capture="environment"
           className="hidden"
           onChange={handleUpload}
         />
