@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/router';
 import { supabase } from '../../lib/supabaseClient';
-import { SECTIONS } from '../../lib/sections';
 import SectionNav from '../../components/SectionNav';
 import BlockCanvas from '../../components/BlockCanvas';
 
@@ -10,8 +9,9 @@ export default function ReportEditor() {
   const { id } = router.query;
 
   const [report, setReport] = useState(null);
-  const [activeKey, setActiveKey] = useState(SECTIONS[0].key);
-  const [blocksBySection, setBlocksBySection] = useState({}); // key -> [block,...]
+  const [pages, setPages] = useState([]);
+  const [activePageId, setActivePageId] = useState(null);
+  const [blocksByPage, setBlocksByPage] = useState({}); // pageId -> [block,...]
   const [exporting, setExporting] = useState(false);
   const [loading, setLoading] = useState(true);
 
@@ -22,19 +22,79 @@ export default function ReportEditor() {
 
   async function loadAll() {
     setLoading(true);
-    const [{ data: reportRow }, { data: blocks }] = await Promise.all([
+    const [{ data: reportRow }, { data: pageRows }, { data: blocks }] = await Promise.all([
       supabase.from('reports').select('*').eq('id', id).single(),
+      supabase.from('report_pages').select('*').eq('report_id', id).order('sort_order'),
       supabase.from('report_blocks').select('*').eq('report_id', id).order('sort_order'),
     ]);
 
     setReport(reportRow);
 
+    let finalPages = pageRows || [];
+    if (finalPages.length === 0) {
+      const { data: firstPage } = await supabase
+        .from('report_pages')
+        .insert({ report_id: id, title: 'Halaman 1', sort_order: 0 })
+        .select()
+        .single();
+      finalPages = firstPage ? [firstPage] : [];
+    }
+    setPages(finalPages);
+    setActivePageId(finalPages[0]?.id || null);
+
     const map = {};
     (blocks || []).forEach((b) => {
       map[b.section_key] = [...(map[b.section_key] || []), b];
     });
-    setBlocksBySection(map);
+    setBlocksByPage(map);
     setLoading(false);
+  }
+
+  function nextPageSortOrder() {
+    if (pages.length === 0) return 0;
+    return Math.max(...pages.map((p) => p.sort_order)) + 1;
+  }
+
+  async function handleAddPage() {
+    const { data, error } = await supabase
+      .from('report_pages')
+      .insert({ report_id: id, title: `Halaman ${pages.length + 1}`, sort_order: nextPageSortOrder() })
+      .select()
+      .single();
+    if (!error) {
+      setPages([...pages, data]);
+      setActivePageId(data.id);
+    }
+  }
+
+  async function handleRenamePage(page) {
+    const newTitle = window.prompt('Nama halaman:', page.title);
+    if (!newTitle || !newTitle.trim() || newTitle === page.title) return;
+    const { error } = await supabase.from('report_pages').update({ title: newTitle.trim() }).eq('id', page.id);
+    if (!error) {
+      setPages(pages.map((p) => (p.id === page.id ? { ...p, title: newTitle.trim() } : p)));
+    }
+  }
+
+  async function handleDeletePage(page) {
+    if (pages.length <= 1) return;
+    if (!window.confirm(`Hapus "${page.title}"? Semua isi di halaman ini ikut kehapus.`)) return;
+
+    const pageBlocks = blocksByPage[page.id] || [];
+    const imagePaths = pageBlocks.filter((b) => b.block_type === 'image' && b.storage_path).map((b) => b.storage_path);
+    if (imagePaths.length > 0) {
+      await supabase.storage.from('report-images').remove(imagePaths);
+    }
+    await supabase.from('report_blocks').delete().eq('report_id', id).eq('section_key', page.id);
+    await supabase.from('report_pages').delete().eq('id', page.id);
+
+    const remaining = pages.filter((p) => p.id !== page.id);
+    setPages(remaining);
+    const { [page.id]: _removed, ...restBlocks } = blocksByPage;
+    setBlocksByPage(restBlocks);
+    if (activePageId === page.id) {
+      setActivePageId(remaining[0]?.id || null);
+    }
   }
 
   async function handleExport() {
@@ -60,7 +120,7 @@ export default function ReportEditor() {
     }
   }
 
-  if (loading || !report) {
+  if (loading || !report || !activePageId) {
     return (
       <div className="min-h-screen bg-neutral-950 text-neutral-400 flex items-center justify-center text-sm">
         Memuat laporan...
@@ -68,10 +128,10 @@ export default function ReportEditor() {
     );
   }
 
-  const activeSection = SECTIONS.find((s) => s.key === activeKey);
-  const doneKeys = new Set(
-    Object.keys(blocksBySection).filter((k) =>
-      (blocksBySection[k] || []).some(
+  const activePage = pages.find((p) => p.id === activePageId);
+  const doneIds = new Set(
+    Object.keys(blocksByPage).filter((k) =>
+      (blocksByPage[k] || []).some(
         (b) => (b.block_type === 'text' && b.text_content?.trim()) || b.block_type === 'image'
       )
     )
@@ -93,16 +153,24 @@ export default function ReportEditor() {
             {exporting ? 'Membuat file...' : 'Export .docx'}
           </button>
         </div>
-        <SectionNav activeKey={activeKey} onSelect={setActiveKey} doneKeys={doneKeys} />
+        <SectionNav
+          pages={pages}
+          activeId={activePageId}
+          onSelect={setActivePageId}
+          onAddPage={handleAddPage}
+          onRenamePage={handleRenamePage}
+          onDeletePage={handleDeletePage}
+          doneIds={doneIds}
+        />
       </div>
 
       <div className="px-4 pt-4">
         <BlockCanvas
           reportId={id}
-          section={activeSection}
-          blocks={blocksBySection[activeKey]}
+          page={activePage}
+          blocks={blocksByPage[activePageId]}
           onBlocksChange={(updated) =>
-            setBlocksBySection((prev) => ({ ...prev, [activeKey]: updated }))
+            setBlocksByPage((prev) => ({ ...prev, [activePageId]: updated }))
           }
         />
       </div>
