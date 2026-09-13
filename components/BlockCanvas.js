@@ -199,6 +199,12 @@ export default function BlockCanvas({ reportId, section, blocks, onBlocksChange 
                 className="w-full resize-none outline-none text-sm leading-relaxed placeholder-neutral-300"
                 placeholder="Tulis paragraf di sini..."
                 value={block.text_content || ''}
+                enterKeyHint="enter"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.stopPropagation();
+                  }
+                }}
                 onChange={(e) => {
                   e.target.style.height = 'auto';
                   e.target.style.height = e.target.scrollHeight + 'px';
