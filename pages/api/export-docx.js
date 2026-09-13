@@ -14,7 +14,6 @@ import {
 } from 'docx';
 import sizeOf from 'image-size';
 import { getSupabaseServer } from '../../lib/supabaseServer';
-import { SECTIONS } from '../../lib/sections';
 
 const MAX_IMG_WIDTH = 420; // px, muat di lebar halaman A4 dikurangi margin
 
@@ -34,22 +33,21 @@ async function getImageBuffer(supabase, storagePath) {
   return Buffer.from(arrayBuffer);
 }
 
-function textBlockParagraphs(text) {
-  return (text || '')
-    .split('\n\n')
-    .filter(Boolean)
-    .map(
-      (p) =>
-        new Paragraph({
-          alignment: AlignmentType.JUSTIFIED,
-          spacing: { after: 200, line: 360 },
-          indent: { firstLine: 720 },
-          children: [new TextRun({ text: p, size: 24 })],
-        })
-    );
+function textBlockParagraphs(text, pageBreakBefore = false) {
+  const paras = (text || '').split('\n\n').filter(Boolean);
+  return paras.map(
+    (p, i) =>
+      new Paragraph({
+        alignment: AlignmentType.JUSTIFIED,
+        spacing: { after: 200, line: 360 },
+        indent: { firstLine: 720 },
+        pageBreakBefore: i === 0 ? pageBreakBefore : false,
+        children: [new TextRun({ text: p, size: 24 })],
+      })
+  );
 }
 
-async function imageBlockParagraphs(supabase, block) {
+async function imageBlockParagraphs(supabase, block, pageBreakBefore = false) {
   const buffer = await getImageBuffer(supabase, block.storage_path);
   let width = MAX_IMG_WIDTH;
   let height = 260;
@@ -67,6 +65,7 @@ async function imageBlockParagraphs(supabase, block) {
     new Paragraph({
       alignment: AlignmentType.CENTER,
       spacing: { before: 200, after: block.caption ? 60 : 200 },
+      pageBreakBefore,
       children: [
         new ImageRun({
           data: buffer,
@@ -100,10 +99,11 @@ export default async function handler(req, res) {
 
   const supabase = getSupabaseServer();
 
-  const [{ data: report }, { data: members }, { data: blocks }, { data: signers }, { data: logs }] =
+  const [{ data: report }, { data: members }, { data: pages }, { data: blocks }, { data: signers }, { data: logs }] =
     await Promise.all([
       supabase.from('reports').select('*').eq('id', reportId).single(),
       supabase.from('report_members').select('*').eq('report_id', reportId).order('sort_order'),
+      supabase.from('report_pages').select('*').eq('report_id', reportId).order('sort_order'),
       supabase.from('report_blocks').select('*').eq('report_id', reportId).order('sort_order'),
       supabase.from('approval_signers').select('*').eq('report_id', reportId).order('sort_order'),
       supabase.from('daily_logs').select('*').eq('report_id', reportId).order('log_date'),
@@ -111,9 +111,9 @@ export default async function handler(req, res) {
 
   if (!report) return res.status(404).json({ error: 'Laporan gak ketemu' });
 
-  const blocksBySection = {};
+  const blocksByPage = {};
   (blocks || []).forEach((b) => {
-    blocksBySection[b.section_key] = [...(blocksBySection[b.section_key] || []), b];
+    blocksByPage[b.section_key] = [...(blocksByPage[b.section_key] || []), b];
   });
 
   const children = [];
@@ -196,30 +196,20 @@ export default async function handler(req, res) {
     children.push(new Paragraph({ pageBreakBefore: true, children: [] }));
   }
 
-  // ---------- SECTIONS (Kata Pengantar, BAB I-IV, dst) sesuai urutan blok ----------
-  for (const sec of SECTIONS) {
-    children.push(
-      new Paragraph({
-        alignment: AlignmentType.CENTER,
-        spacing: { before: 400, after: 300 },
-        children: [new TextRun({ text: sec.heading, bold: true, size: 28 })],
-      })
-    );
+  // ---------- HALAMAN-HALAMAN BEBAS (isi canvas user, urut sesuai sort_order) ----------
+  const orderedPages = pages || [];
+  for (let i = 0; i < orderedPages.length; i++) {
+    const page = orderedPages[i];
+    const pageBlocks = (blocksByPage[page.id] || []).sort((a, b) => a.sort_order - b.sort_order);
 
-    const secBlocks = (blocksBySection[sec.key] || []).sort((a, b) => a.sort_order - b.sort_order);
-
-    if (secBlocks.length === 0) {
-      children.push(
-        new Paragraph({ children: [new TextRun({ text: '(belum diisi)', italics: true, color: '999999' })] })
-      );
-    }
-
-    for (const block of secBlocks) {
+    for (let j = 0; j < pageBlocks.length; j++) {
+      const block = pageBlocks[j];
+      const needsBreak = j === 0 && i > 0;
       if (block.block_type === 'text') {
-        children.push(...textBlockParagraphs(block.text_content));
+        children.push(...textBlockParagraphs(block.text_content, needsBreak));
       } else if (block.block_type === 'image') {
         try {
-          const imgParas = await imageBlockParagraphs(supabase, block);
+          const imgParas = await imageBlockParagraphs(supabase, block, needsBreak);
           children.push(...imgParas);
         } catch (e) {
           children.push(
